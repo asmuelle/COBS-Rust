@@ -409,6 +409,56 @@ pub fn generate_boundary_lp_rows(
     }
 }
 
+/// Generates a single LP constraint row for a periodicity constraint `s(x_start) = s(x_end)`.
+///
+/// The constraint implies `s(x_start) - s(x_end) = 0`.
+///
+/// # Arguments
+/// * `constraint` - The `PeriodicityConstraint` definition.
+/// * `order` - The order of the B-spline (m).
+/// * `knots` - The knot vector.
+/// * `num_coefficients` - The number of B-spline coefficients (N_coeffs).
+///
+/// # Returns
+/// A `Result` containing an `LpConstraintRow` or an error string.
+pub fn generate_periodicity_lp_rows(
+    constraint: &PeriodicityConstraint,
+    order: usize,
+    knots: &Array1<f64>,
+    num_coefficients: usize,
+) -> Result<LpConstraintRow, String> {
+    if order == 0 {
+        return Err("Order must be greater than 0.".to_string());
+    }
+    if num_coefficients == 0 {
+        // Although the loop for a_row wouldn't run, it's better to be explicit.
+        // Also, Array1::zeros(0) is valid, but constraint logic implies non-empty.
+        return Err("Number of coefficients must be greater than 0.".to_string());
+    }
+    if knots.len() != num_coefficients + order {
+        return Err(format!(
+            "Knots length must be equal to num_coefficients + order ({} != {} + {}).",
+            knots.len(),
+            num_coefficients,
+            order
+        ));
+    }
+
+    let mut a_row = Array1::zeros(num_coefficients);
+
+    for j in 0..num_coefficients {
+        let val_start = crate::core::splines::b_spline_basis(j, order, constraint.x_start, knots);
+        let val_end = crate::core::splines::b_spline_basis(j, order, constraint.x_end, knots);
+        a_row[j] = val_start - val_end;
+    }
+
+    Ok(LpConstraintRow {
+        a_row,
+        rhs: 0.0, // s(x_start) - s(x_end) = 0
+        kind: PointwiseConstraintKind::Equals,
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -424,6 +474,7 @@ mod tests {
     }
 
 
+    // --- Tests for Monotonicity Constraints ---
     #[test]
     fn test_monotonicity_lp_constraints_increase() {
         let num_coeffs = 3;
@@ -717,5 +768,90 @@ mod tests {
             x: 0.5, value: 2.0, derivative_order: 0, kind: PointwiseConstraintKind::Equals 
         };
         assert!(generate_pointwise_derivative_lp_rows(&constraint, 2, &arr1(&[0.,0.,1.,1.]), 2).is_err());
+    }
+
+    // --- Tests for Periodicity Constraints ---
+
+    #[test]
+    fn test_generate_periodicity_lp_rows_simple() {
+        let constraint = PeriodicityConstraint { x_start: 0.0, x_end: 1.0 };
+        let order = 2; // Linear
+        let num_coeffs = 2;
+        let knots = arr1(&[0.0, 0.0, 1.0, 1.0]); // Clamped [0,1], N+m = 2+2=4
+        // B_0,2(0.0) = 1.0, B_0,2(1.0) = 0.0 => a_row[0] = 1.0 - 0.0 = 1.0
+        // B_1,2(0.0) = 0.0, B_1,2(1.0) = 1.0 => a_row[1] = 0.0 - 1.0 = -1.0
+        let row = generate_periodicity_lp_rows(&constraint, order, &knots, num_coeffs).unwrap();
+        
+        assert_array_eq_tol(&row.a_row, &arr1(&[1.0, -1.0]), TOL_POINTWISE);
+        assert!((row.rhs - 0.0).abs() < TOL_POINTWISE);
+        assert_eq!(row.kind, PointwiseConstraintKind::Equals);
+    }
+
+    #[test]
+    fn test_generate_periodicity_lp_rows_cubic_example() {
+        // Example from a practical scenario: s(x_min) = s(x_max)
+        // Let domain be [0, 3]. x_start = 0, x_end = 3.
+        let constraint = PeriodicityConstraint { x_start: 0.0, x_end: 3.0 };
+        let order = 4; // Cubic
+        let num_coeffs = 5; 
+        // Knots: N+m = 5+4 = 9. Example: Clamped [0,3]
+        // t0-t3=0, t4=1, t5=2, t6-t9=3
+        let knots = arr1(&[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0]); 
+        // If x_start=0, only B_0,4(0) will be 1, others 0.
+        // If x_end=3, only B_N-1,4(3) = B_4,4(3) will be 1, others 0.
+        // So, for j=0: B_0,4(0) - B_0,4(3) = 1.0 - 0.0 = 1.0
+        // For j=1: B_1,4(0) - B_1,4(3) = 0.0 - 0.0 = 0.0
+        // ...
+        // For j=4: B_4,4(0) - B_4,4(3) = 0.0 - 1.0 = -1.0
+        // Expected a_row: [1.0, 0.0, 0.0, 0.0, -1.0]
+
+        // Need to adjust knots for the example to be fully clamped at x_end=3 for B_N-1 to be 1.
+        // Knots: t0-t3=0, t4=1, t5=2, t6-t9=3. Incorrect.
+        // Knots: t0..t_{m-1} = x_min, t_N..t_{N+m-1} = x_max
+        // N=5, m=4. x_min=0, x_max=3.
+        // t0,t1,t2,t3 = 0
+        // t_N = t5. So t_N..t_{N+m-1} = t5,t6,t7,t8.
+        // For clamped [0,3], it should be:
+        // knots[0..3] = 0, knots[5..8] = 3. knots[4] is the interior knot.
+        // So, [0,0,0,0, 1.5, 3,3,3,3] (example with one interior knot at 1.5)
+        let knots_clamped = arr1(&[0.0, 0.0, 0.0, 0.0, 1.5, 3.0, 3.0, 3.0, 3.0]);
+
+        let row = generate_periodicity_lp_rows(&constraint, order, &knots_clamped, num_coeffs).unwrap();
+        
+        assert_array_eq_tol(&row.a_row, &arr1(&[1.0, 0.0, 0.0, 0.0, -1.0]), TOL_POINTWISE);
+        assert!((row.rhs - 0.0).abs() < TOL_POINTWISE);
+        assert_eq!(row.kind, PointwiseConstraintKind::Equals);
+    }
+
+    #[test]
+    fn test_generate_periodicity_lp_rows_validation_order_zero() {
+        let constraint = PeriodicityConstraint { x_start: 0.0, x_end: 1.0 };
+        let knots = arr1(&[0.0, 0.0, 1.0, 1.0]);
+        let result = generate_periodicity_lp_rows(&constraint, 0, &knots, 2);
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Order must be greater than 0.");
+    }
+
+    #[test]
+    fn test_generate_periodicity_lp_rows_validation_num_coeffs_zero() {
+        let constraint = PeriodicityConstraint { x_start: 0.0, x_end: 1.0 };
+        let knots = arr1(&[0.0, 0.0]); // For N=0, m=2 -> len 2
+        let result = generate_periodicity_lp_rows(&constraint, 2, &knots, 0);
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Number of coefficients must be greater than 0.");
+    }
+
+    #[test]
+    fn test_generate_periodicity_lp_rows_validation_knots_len() {
+        let constraint = PeriodicityConstraint { x_start: 0.0, x_end: 1.0 };
+        let order = 2;
+        let num_coeffs = 2;
+        let knots_wrong_len = arr1(&[0.0, 0.0, 1.0]); // Expected N+m = 2+2=4
+        let result = generate_periodicity_lp_rows(&constraint, order, &knots_wrong_len, num_coeffs);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            "Knots length must be equal to num_coefficients + order (3 != 2 + 2)."
+        );
     }
 }
