@@ -137,6 +137,3 @@ cargo bench
 ---
 
 *For more details and API usage, see the documentation or explore the source code.*
-```
-
-If you provide the contents of `core.rs`, I can adapt the usage example to be concrete and accurate. Let me know if you want to include more specific usage or API details!
