@@ -214,7 +214,7 @@ pub fn solve_cobs_problem(
     let mut current_row_idx = 0;
 
     // Equalities: A_eq z = b_eq  =>  A_eq z + s = b_eq, s in ZeroCone
-    for row_info in eq_rows_internal {
+    for row_info in &eq_rows_internal { // Iterate by reference
         // Original: a_row * z = rhs
         // Clarabel: A_c * z + s_zero = b_c. So, A_c = a_row, b_c = rhs
         for (col_idx, &val) in row_info.a_row.iter().enumerate() {
@@ -230,7 +230,7 @@ pub fn solve_cobs_problem(
     }
 
     // Inequalities:
-    for row_info in ineq_rows_internal {
+    for row_info in &ineq_rows_internal { // Iterate by reference
         match row_info.kind {
             PointwiseConstraintKind::LessThanOrEqual => { // a_row * z <= rhs
                 // Clarabel: A_c * z + s_nonneg = b_c. So, A_c = a_row, b_c = rhs
@@ -262,11 +262,72 @@ pub fn solve_cobs_problem(
 
     let num_total_constraints = current_row_idx;
     let a_csc = if num_total_constraints > 0 || total_vars > 0 {
-         CscMatrix::from_triplets(num_total_constraints, total_vars, a_triplets)
-            .map_err(|e| format!("Failed to create CSC matrix A: {:?}", e))?
+        // Convert triplets to CSC format for CscMatrix::new
+        let m = num_total_constraints;
+        let n = total_vars;
+        let nnz = a_triplets.len();
+
+        // Calculate colptr
+        let mut colptr = vec![0; n + 1];
+        let mut col_counts = vec![0; n];
+        for &(_, c, _) in &a_triplets {
+            if c < n { // Basic bounds check for safety, though c should always be < n
+                col_counts[c] += 1;
+            } else {
+                // This case should ideally not happen if total_vars is correct
+                return Err(format!("Column index {} out of bounds for {} total variables.", c, n));
+            }
+        }
+
+        colptr[0] = 0;
+        for j in 0..n {
+            colptr[j + 1] = colptr[j] + col_counts[j];
+        }
+        
+        // Ensure colptr[n] == nnz, which it should be if col_counts were accurate
+        if colptr[n] != nnz && nnz > 0 { // Allow nnz=0 case where colptr[n] would also be 0.
+             // This might indicate an issue with col_counts accumulation or triplet generation
+             return Err(format!(
+                "Mismatch in CSC matrix construction: colptr[n] ({}) != nnz ({}). Col counts: {:?}, Colptr: {:?}",
+                colptr[n], nnz, col_counts, colptr
+            ));
+        }
+
+
+        // Sort triplets: column-major, then row-major
+        // Clarabel's CscMatrix::new expects row indices within each column to be sorted.
+        a_triplets.sort_unstable_by_key(|k| (k.1, k.0));
+
+        let mut rowval_indices = Vec::with_capacity(nnz);
+        let mut nzval_f64 = Vec::with_capacity(nnz);
+
+        for (r, _, val) in &a_triplets {
+            rowval_indices.push(*r);
+            nzval_f64.push(*val);
+        }
+        
+        // Basic validation before calling CscMatrix::new, which might panic
+        if rowval_indices.len() != nnz {
+            return Err(format!("Rowval length {} does not match nnz {}", rowval_indices.len(), nnz));
+        }
+        if nzval_f64.len() != nnz {
+            return Err(format!("Nzval length {} does not match nnz {}", nzval_f64.len(), nnz));
+        }
+        if colptr.len() != n + 1 {
+             return Err(format!("Colptr length {} does not match n+1 {}", colptr.len(), n+1));
+        }
+
+
+        CscMatrix::new(m, n, colptr, rowval_indices, nzval_f64)
     } else {
         // Handle case with no constraints and no variables for Clarabel
-        CscMatrix::new(0,0,vec![0], vec![], vec![])
+        // Or if num_total_constraints is 0 but total_vars > 0 (no rows in A)
+        // Or if total_vars is 0 but num_total_constraints > 0 (no columns in A)
+        if total_vars == 0 { // No columns
+             CscMatrix::new(num_total_constraints, 0, vec![0], vec![], vec![])
+        } else { // No rows, or both no rows and no columns (covered by first branch)
+             CscMatrix::new(0, total_vars, vec![0; total_vars + 1], vec![], vec![])
+        }
     };
    
 
