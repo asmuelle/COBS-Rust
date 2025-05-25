@@ -34,28 +34,30 @@ pub fn b_spline_basis(
 
     // Base case (m=1, i.e., degree 0, piecewise constant)
     if m == 1 {
-        let t_j = knots[j]; // Safe: j < num_basis_functions = knots.len() - 1. So j < knots.len() -1. Thus j+1 < knots.len().
-        let t_j_plus_1 = knots[j + 1]; // Safe due to j < knots.len() - m and m=1 means j < knots.len() - 1.
+        let t_j = knots[j];
+        let t_j_plus_1 = knots[j + 1]; // Safe due to j < knots.len() - m and m=1 implies j < knots.len() - 1.
+                                     // Max j is (knots.len() - m) - 1. So j+1 <= knots.len() - m.
+                                     // If knots.len() - m is the index of the last knot relevant for domain definition,
+                                     // then knots[j+1] is safe. Example: knots [0,1,2,3], m=1. num_coeffs = 3.
+                                     // Max j = 2. knots[2+1] = knots[3] is valid.
+                                     // knots[knots.len() - m] is knots[4-1]=knots[3].
 
-        // Standard case: B_j,1(x) = 1.0 if t_j <= x < t_j+1, and 0.0 otherwise.
-        // Handle the edge case for the last knot interval:
-        // If x is exactly at the end of the domain.
-        // The number of basis functions N_coeffs = knots.len() - m. (num_basis_functions)
-        // The last basis function index is N_coeffs - 1.
-        // The domain is typically considered [t_{m-1}, t_{N_coeffs}].
-        // For m=1, domain is [t_0, t_{N_coeffs}]. t_{N_coeffs} is knots[knots.len()-m].
+        // Explicitly handle the case where the interval [t_j, t_{j+1}) has zero length.
+        if t_j == t_j_plus_1 {
+            return 0.0;
+        }
+        // From this point, we know t_j < t_j_plus_1.
 
         if x >= t_j && x < t_j_plus_1 {
+            // x is within the non-empty interval [t_j, t_{j+1}).
             return 1.0;
-        } else if x == t_j_plus_1 && t_j_plus_1 == knots[knots.len() - m] { // knots.len() - m is index of t_{N_coeffs}
-            // This condition means x is at the end of the considered domain for splines of order m
-            // and we are evaluating the basis function whose interval is the last one.
-             if j == num_basis_functions - 1 { // If this is the very last basis function B_{N_coeffs-1, 1}(x)
-                 return 1.0;
-             } else {
-                 return 0.0;
-             }
+        } else if x == t_j_plus_1 && t_j_plus_1 == knots[knots.len() - m] {
+            // x is exactly at t_{j+1}, AND t_{j+1} is the end of the overall spline domain for this order.
+            // Since we've established t_j < t_j_plus_1, the limit from the left is 1.0.
+            // This covers the case where B_{j,1}(t_{end}) = 1 if its support [t_j, t_{end}) was active.
+            return 1.0;
         } else {
+            // x is outside [t_j, t_{j+1}] or t_{j+1} is not the end of the domain but x=t_{j+1} (handled by x < t_{j+1} fail)
             return 0.0;
         }
     }
@@ -640,9 +642,9 @@ mod tests {
         // B_0,2(2.0) = 0
         // B_1,2(2.0) = 0
         // B_2,2(2.0) = 1
-        // Sum = a2 * B_2,2(2.0). If B_2,2(2.0) is 0, then sum is 0.
+        // Sum = a2 * B_2,2(2.0) = 1.5 * 1.0 = 1.5
         let val_at_2_0 = evaluate_spline(2.0, 2, &knots, &coeffs).unwrap();
-        assert!((val_at_2_0 - 0.0).abs() < TOL); // Corrected expectation
+        assert!((val_at_2_0 - 1.5).abs() < TOL); // Expect last coefficient
     }
 
     #[test]
@@ -705,10 +707,10 @@ mod tests {
 
         // At x = 2.0: (t4, end of effective domain)
         // B_0,3(2.0)=0, B_1,3(2.0)=0, B_2,3(2.0)=0
-        // B_3,3(2.0)=0 with current b_spline_basis.
-        // Sum = a3 * 0.0 = 0.0
+        // B_3,3(2.0)=1 for clamped end.
+        // Sum = a3 * B_3,3(2.0) = 3.0 * 1.0 = 3.0
         let val_at_2_0 = evaluate_spline(2.0, 3, &knots, &coeffs).unwrap();
-        assert!((val_at_2_0 - 0.0).abs() < TOL); // Corrected expectation
+        assert!((val_at_2_0 - 3.0).abs() < TOL); // Expect last coefficient
     }
 
     #[test]
